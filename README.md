@@ -33,69 +33,54 @@ That's the whole thing. Build instructions are further down if you want them.
 
 ---
 
-## Running it FROM the console (no PC needed)
+## Running the Payload
 
 Dropping a bare `.elf` into a folder does **not** run it. Nothing on the PS5
-scans for loose ELF files. A payload must be handed to an ELF loader. There are
-three ways to do that; pick one.
+scans for loose ELF files. A payload must be handed to an ELF loader.
+Because **the game must remain running with its DLC mounted** in order for `/mnt/sandbox/pfsmnt` to exist, the payload must be run without claiming the console's foreground "Big App" slot.
 
-### Option A — Homebrew Launcher, web UI (recommended)
+Pick one of the two working methods below:
 
-**The ordering problem this solves:** the Homebrew Launcher runs homebrew by
-hijacking a "big app" process, and a PS5 runs **one big app at a time**. So
-launching a payload from the launcher while a game is running *closes that
-game* — unmounting the DLC you came for. A one-shot dumper launched that way
-always finds nothing.
+### Option 1 — Send over the network (Recommended)
 
-The payload therefore defaults to a **resident web UI**, the same pattern
-ps5-app-dumper uses:
+`ps5-payload-elfldr` (listening on port 9021) runs as a background system daemon. Sending the payload here **never touches or closes your running game**.
 
-1. FTP the **`DLC-Dumper`** folder (or unzip `DLC-Dumper-homebrew.zip`) into
-   `/data/homebrew/`, `/mnt/usb0/homebrew/` or `/mnt/ext0/homebrew/`.
-2. With **no game running**, open the Homebrew Launcher and pick **DLC Dumper**.
-3. It goes resident and shows a notification: `http://<ps5-ip>:8082`
-   (walks up to 8089 if busy — 8080 is websrv, 8081 is ps5-app-dumper).
-4. **Now** start Fallout 4 and enter the DLC content.
-5. Open that URL on your phone or PC and press **Dump**.
+1. Start your game (e.g. Fallout 4) and travel into the DLC area.
+2. Press the **PS button** once to go to the home screen (**do NOT close the game**).
+3. From your Mac or PC, run:
+   ```bash
+   ./send.sh 192.168.1.6        # replace with your PS5 IP
+   ```
+4. A notification appears on your TV: `DLC Dumper ready http://<ps5-ip>:8082`.
+5. Open that URL on your phone or PC browser and click **Dump**.
 
-The page live-polls the console: whether a game sandbox is alive, which `-ac`
-folders are mounted, the USB it found, and per-file progress. You can dump
+The web UI live-polls the console: whether a game sandbox is alive, which `-ac`
+folders are mounted, the USB it found, and per-file copy progress. You can dump
 everything or one DLC at a time.
 
-Package layout (all three files matter):
+### Option 2 — etaHEN Toolbox (No PC needed)
 
-```
-/data/homebrew/DLC-Dumper/
-├── eboot.elf            # required
-├── homebrew.js          # menu entry + one-shot options
-└── sce_sys/icon0.png    # required
-```
+etaHEN's payload menu loads the ELF inside the etaHEN system daemon rather than claiming the Big App slot, so your running game survives.
 
-### Option B — etaHEN Toolbox (one-shot)
+1. FTP `dlc_dump.elf` to **`/data/etaHEN/payloads/`**.
+2. Start the game first, enter the DLC content, press **PS button** to home.
+3. Open **Settings → etaHEN Toolbox → Plugins / Payload ELFs** → run `dlc_dump.elf`.
+4. It starts the web UI on port 8082 without interrupting the game. Open `http://<ps5-ip>:8082` on your phone to trigger the dump.
 
-etaHEN's payload menu loads the ELF without claiming the big-app slot, so the
-running game survives. Good for a fire-and-forget dump.
+> [!WARNING]
+> **Do NOT tick auto-start for this payload in etaHEN.** At boot nothing is mounted, and a bad autoload entry can wedge the boot chain.
 
-1. FTP `dlc_dump.elf` to **`/data/etaHEN/payloads/`**
-2. Start the game first, enter the DLC, PS button to home.
-3. **Settings → etaHEN Toolbox → Plugins / Payload ELFs** → run it.
+---
 
-Because a game is already running, pass no web flag — but note the Toolbox
-launches with no arguments, which starts the *web UI*. If you want a pure
-one-shot from the Toolbox, rename a copy built with `--now` baked in, or just
-use the web UI (it works fine with the game already running).
+### Why NOT the Homebrew Launcher?
 
-**Do NOT tick auto-start for this payload.** At boot nothing is mounted, and a
-bad autoload entry can wedge the boot chain badly enough to need a USB
-`autoload.txt` override to recover.
+The PS5 operating system strictly enforces **one Big App process at a time**.
 
-### Option C — send it over the network
+* The **Homebrew Launcher (HBL) is itself a Big App** (running inside a hijacked game/app process).
+* Opening the Homebrew Launcher while a game is running forces the PS5 OS to **immediately terminate the game**, instantly unmounting `/mnt/sandbox/pfsmnt`.
+* Launching HBL first and then launching the game forces the OS to terminate HBL (killing any dumper payload launched by it).
 
-```bash
-./send.sh 192.168.1.6        # starts the web UI
-```
-
-Nothing to install on the console. Best when iterating.
+Therefore, **do not use the Homebrew Launcher** for DLC dumping. Always use **Option 1 (`./send.sh`)** or **Option 2 (etaHEN Toolbox)**.
 
 ---
 
@@ -103,17 +88,16 @@ Nothing to install on the console. Best when iterating.
 
 | Invocation | Mode | Game must be running? |
 |---|---|---|
-| *(no args)* | Resident web UI on :8082 | **No** — start it first |
-| `--now` | One-shot, dumps everything | **Yes** |
+| *(no args)* | Resident web UI on :8082 | **Yes** (suspended in background) |
+| `--now` | One-shot, dumps immediately | **Yes** |
 | `FALLOUT4DLC00003` | One-shot, filtered | **Yes** |
-| `--web` | Force web UI | No |
+| `--web` | Force web UI | **Yes** |
 
 ---
 
 ## Which option should you use?
 
-**Option A.** It is the only one that sidesteps the big-app ordering problem,
-and it gives you live feedback instead of a silent dump.
+**Option 1 (`./send.sh`).** It leaves the game running cleanly, requires no installation on the console, and gives you live web UI feedback. If you don't have a computer nearby, use **Option 2 (etaHEN Toolbox)**.
 
 Whichever you pick, the rule is absolute: **kstuff loaded before the game, game
 running with the DLC content actually entered, exFAT USB plugged in.**

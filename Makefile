@@ -43,16 +43,11 @@ endif
 ELF    := dlc_dump.elf
 CFLAGS := -Wall -Wextra -O2 -g
 
-all: $(ELF) pkg
+all: $(ELF)
 
 $(ELF): main.c web.c
 	$(CC) $(CFLAGS) -o $@ main.c
 	$(STRIP) $@
-
-pkg: $(ELF)
-	cp $(ELF) homebrew/DLC-Dumper/eboot.elf
-	rm -f DLC-Dumper-homebrew.zip
-	(cd homebrew && zip -q -r ../DLC-Dumper-homebrew.zip DLC-Dumper)
 
 clean:
 	rm -f $(ELF) sim
@@ -74,5 +69,5 @@ sim: main.c web.c
 	  -DUSBBASE='"/tmp/ps5sim/usb"' \
 	  -o sim main.c -lpthread
 
-.PHONY: all clean test send pkg
+.PHONY: all clean test send
 
