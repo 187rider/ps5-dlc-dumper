@@ -58,9 +58,6 @@ typedef struct notify_request {
     char message[3075];
 } notify_request_t;
 
-extern int sceKernelSendNotificationRequest(int, notify_request_t *, size_t, int)
-    __attribute__((weak));
-
 static FILE *g_log = NULL;
 
 static void LOG(const char *fmt, ...) {
@@ -78,6 +75,14 @@ static void LOG(const char *fmt, ...) {
     if (g_log) { fprintf(g_log, "%s\n", buf); fflush(g_log); }
 }
 
+#if defined(SIM) || (defined(__APPLE__) && !defined(__PROSPERO__))
+static void notify(const char *fmt, ...) {
+    (void)fmt;
+}
+#else
+extern int sceKernelSendNotificationRequest(int, notify_request_t *, size_t, int)
+    __attribute__((weak));
+
 static void notify(const char *fmt, ...) {
     notify_request_t req;
     va_list ap;
@@ -91,6 +96,7 @@ static void notify(const char *fmt, ...) {
 
     sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
 }
+#endif
 
 /* Provided by web.c (included near the bottom of this file). */
 void web_progress(const char *path, uint64_t files, uint64_t dirs,
@@ -224,6 +230,7 @@ static int copy_file(const char *src, const char *dst, void *buf, stats_t *st) {
 out:
     if (fd >= 0) close(fd);
     if (fs >= 0) close(fs);
+    if (rc < 0 && fd >= 0) unlink(dst);
     return rc;
 }
 
@@ -273,12 +280,18 @@ static char g_usb[64];
 static int find_usb(void) {
     char probe[128];
     for (int i = 0; i < 8; i++) {
-        snprintf(g_usb, sizeof(g_usb), "%s%d", USBBASE, i);
-        if (!is_dir(g_usb)) continue;
+        char candidate[64];
+        snprintf(candidate, sizeof(candidate), "%s%d", USBBASE, i);
+        if (!is_dir(candidate)) continue;
         /* verify writability */
-        snprintf(probe, sizeof(probe), "%s/.dlcdump_wtest", g_usb);
+        snprintf(probe, sizeof(probe), "%s/.dlcdump_wtest", candidate);
         int fd = open(probe, O_WRONLY | O_CREAT | O_TRUNC, 0777);
-        if (fd >= 0) { close(fd); unlink(probe); return 0; }
+        if (fd >= 0) {
+            close(fd);
+            unlink(probe);
+            snprintf(g_usb, sizeof(g_usb), "%s", candidate);
+            return 0;
+        }
     }
     g_usb[0] = '\0';
     return -1;

@@ -26,13 +26,20 @@ ifeq ($(NEEDS_SDK),1)
     endif
 endif
 
+# Ensure Homebrew LLVM (llvm@18) is on PATH if installed
+ifneq ($(wildcard /opt/homebrew/opt/llvm@18/bin),)
+    export PATH := /opt/homebrew/opt/llvm@18/bin:$(PATH)
+else ifneq ($(wildcard /opt/homebrew/opt/llvm/bin),)
+    export PATH := /opt/homebrew/opt/llvm/bin:$(PATH)
+endif
+
 ELF    := dlc_dump.elf
 CFLAGS := -Wall -Wextra -O2 -g
 
 all: $(ELF)
 
-$(ELF): main.c
-	$(CC) $(CFLAGS) -o $@ $^
+$(ELF): main.c web.c
+	$(CC) $(CFLAGS) -o $@ main.c
 
 clean:
 	rm -f $(ELF) sim
@@ -47,11 +54,12 @@ send: $(ELF)
 
 # Host-side build that exercises the copy logic against a fake tree in /tmp.
 # Nothing to do with the PS5 — just proves the scan/filter/copy code is sane.
-sim: main.c
-	cc -Wall -Wextra -O2 \
+sim: main.c web.c
+	cc -Wall -Wextra -O2 -DSIM=1 \
 	  -DPFSMNT='"/tmp/ps5sim/pfsmnt"' \
 	  -DSANDBOX='"/tmp/ps5sim/sandbox"' \
 	  -DUSBBASE='"/tmp/ps5sim/usb"' \
 	  -o sim main.c -lpthread
 
 .PHONY: all clean test send
+

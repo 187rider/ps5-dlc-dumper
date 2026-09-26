@@ -15,6 +15,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <pthread.h>
+#include <signal.h>
 
 #define WEB_PORT_FIRST 8082    /* 8080 = websrv, 8081 = ps5-app-dumper */
 #define WEB_PORT_TRIES 8
@@ -42,6 +43,30 @@ void web_progress(const char *path, uint64_t files, uint64_t dirs,
 
 /* ------------------------------ tiny helpers ------------------------------ */
 
+static void escape_json_str(char *out, size_t outsz, const char *in) {
+    size_t j = 0;
+    if (outsz == 0) return;
+    for (size_t i = 0; in && in[i] && j + 2 < outsz; i++) {
+        unsigned char c = (unsigned char)in[i];
+        if (c == '"' || c == '\\') {
+            out[j++] = '\\';
+            out[j++] = (char)c;
+        } else if (c == '\n') {
+            out[j++] = '\\';
+            out[j++] = 'n';
+        } else if (c == '\r') {
+            out[j++] = '\\';
+            out[j++] = 'r';
+        } else if (c == '\t') {
+            out[j++] = '\\';
+            out[j++] = 't';
+        } else if (c >= 32) {
+            out[j++] = (char)c;
+        }
+    }
+    out[j] = '\0';
+}
+
 static int get_local_ip(char *out, size_t n) {
     struct sockaddr_in a, l;
     socklen_t ll = sizeof(l);
@@ -68,10 +93,11 @@ static void send_all(int fd, const char *b, size_t n) {
 
 static void send_response(int fd, const char *status, const char *ctype,
                           const char *body) {
-    char hdr[256];
+    char hdr[320];
     int  n = snprintf(hdr, sizeof(hdr),
                       "HTTP/1.1 %s\r\nContent-Type: %s\r\n"
                       "Content-Length: %zu\r\nConnection: close\r\n"
+                      "Access-Control-Allow-Origin: *\r\n"
                       "Cache-Control: no-store\r\n\r\n",
                       status, ctype, strlen(body));
     send_all(fd, hdr, (size_t)n);
@@ -85,19 +111,31 @@ static void json_mounts(char *out, size_t n) {
     size_t used = 0;
     int first = 1;
 
-    used += (size_t)snprintf(out + used, n - used, "[");
+    if (n == 0) return;
+    int r = snprintf(out, n, "[");
+    if (r > 0 && (size_t)r < n) used = (size_t)r;
+
     if ((d = opendir(PFSMNT))) {
-        while ((e = readdir(d)) && used < n - 128) {
+        while ((e = readdir(d)) && used + 128 < n) {
             if (!str_endswith(e->d_name, "-ac"))    continue;
             if (str_endswith(e->d_name, "-nest"))   continue;
             if (str_endswith(e->d_name, "-union"))  continue;
-            used += (size_t)snprintf(out + used, n - used, "%s\"%s\"",
-                                     first ? "" : ",", e->d_name);
-            first = 0;
+            char esc_name[128];
+            escape_json_str(esc_name, sizeof(esc_name), e->d_name);
+            r = snprintf(out + used, n - used, "%s\"%s\"",
+                         first ? "" : ",", esc_name);
+            if (r > 0 && (size_t)r < n - used) {
+                used += (size_t)r;
+                first = 0;
+            }
         }
         closedir(d);
     }
-    snprintf(out + used, n - used, "]");
+    if (used < n) {
+        snprintf(out + used, n - used, "]");
+    } else {
+        out[n - 1] = '\0';
+    }
 }
 
 /* Is any PPSA/CUSA game sandbox alive right now? */
@@ -120,19 +158,15 @@ static int game_running(char *title, size_t tn) {
 /* ------------------------------ dump thread ------------------------------ */
 
 int  run_dump(const char *filter, stats_t *st);   /* provided by main.c */
+static int find_usb(void);                         /* provided by main.c */
 
 static void *dump_thread(void *arg) {
-    char   filter[64];
+    char    filter[64];
     stats_t st;
     int     sources;
 
     pthread_mutex_lock(&g_wslock);
     snprintf(filter, sizeof(filter), "%s", g_ws.filter);
-    g_ws.running  = 1;
-    g_ws.finished = 0;
-    g_ws.files = g_ws.dirs = g_ws.bytes = g_ws.errors = 0;
-    g_ws.sources = 0;
-    snprintf(g_ws.message, sizeof(g_ws.message), "Dumping...");
     pthread_mutex_unlock(&g_wslock);
 
     memset(&st, 0, sizeof(st));
@@ -165,15 +199,37 @@ static void *dump_thread(void *arg) {
 
 static int start_dump(const char *filter) {
     pthread_t t;
+    pthread_attr_t attr;
+
     pthread_mutex_lock(&g_wslock);
-    if (g_ws.running) { pthread_mutex_unlock(&g_wslock); return -1; }
+    if (g_ws.running) {
+        pthread_mutex_unlock(&g_wslock);
+        return -1;
+    }
+    g_ws.running  = 1;
+    g_ws.finished = 0;
+    g_ws.files = g_ws.dirs = g_ws.bytes = g_ws.errors = 0;
+    g_ws.sources = 0;
+    g_ws.current[0] = '\0';
     snprintf(g_ws.filter, sizeof(g_ws.filter), "%s", filter ? filter : "");
+    snprintf(g_ws.message, sizeof(g_ws.message), "Starting dump...");
     pthread_mutex_unlock(&g_wslock);
 
-    if (pthread_create(&t, NULL, dump_thread, NULL) != 0) return -1;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 1024 * 1024);
+    if (pthread_create(&t, &attr, dump_thread, NULL) != 0) {
+        pthread_attr_destroy(&attr);
+        pthread_mutex_lock(&g_wslock);
+        g_ws.running = 0;
+        snprintf(g_ws.message, sizeof(g_ws.message), "Failed to start dump thread");
+        pthread_mutex_unlock(&g_wslock);
+        return -1;
+    }
+    pthread_attr_destroy(&attr);
     pthread_detach(t);
     return 0;
 }
+
 
 /* ------------------------------ the page ------------------------------ */
 
@@ -213,7 +269,7 @@ static const char *PAGE =
 "2. the game must be running now (PS button to home is fine, don't close it)<br>"
 "3. enter the DLC content in-game once - many titles mount add-ons lazily"
 "</div></div><script>"
-"function esc(s){return s.replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]))}"
+"function esc(s){return s.replace(/[&<>'\\\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\\'':'&#39;','\"':'&quot;'}[c]))}"
 "function gb(b){return (b/1073741824).toFixed(2)+' GiB'}"
 "async function dump(f){"
 "  document.getElementById('msg').textContent='Starting...';"
@@ -240,13 +296,18 @@ static const char *PAGE =
 /* ------------------------------ server ------------------------------ */
 
 static void handle(int fd) {
-    char req[2048], path[512], body[8192], mounts[4096], title[64];
+    char req[2048], path[512], body[16384], mounts[4096], title[64];
     ssize_t n;
     char *sp, *q;
 
     n = read(fd, req, sizeof(req) - 1);
     if (n <= 0) return;
     req[n] = '\0';
+
+    if (strncmp(req, "OPTIONS ", 8) == 0) {
+        send_response(fd, "204 No Content", "text/plain", "");
+        return;
+    }
 
     if (strncmp(req, "GET ", 4) != 0) {
         send_response(fd, "405 Method Not Allowed", "text/plain", "no");
@@ -288,12 +349,17 @@ static void handle(int fd) {
     if (!strcmp(path, "/status")) {
         int  gr;
         char cur[320], msg[256];
+        char cur_esc[640], msg_esc[512], title_esc[128], usb_esc[128];
         uint64_t files, dirs, bytes, errors;
         int running, finished, sources;
 
         json_mounts(mounts, sizeof(mounts));
         title[0] = '\0';
         gr = game_running(title, sizeof(title));
+
+        if (g_usb[0] == '\0' || !is_dir(g_usb)) {
+            find_usb();
+        }
 
         pthread_mutex_lock(&g_wslock);
         running = g_ws.running; finished = g_ws.finished; sources = g_ws.sources;
@@ -302,15 +368,20 @@ static void handle(int fd) {
         snprintf(msg, sizeof(msg), "%s", g_ws.message);
         pthread_mutex_unlock(&g_wslock);
 
+        escape_json_str(cur_esc, sizeof(cur_esc), cur);
+        escape_json_str(msg_esc, sizeof(msg_esc), msg);
+        escape_json_str(title_esc, sizeof(title_esc), title);
+        escape_json_str(usb_esc, sizeof(usb_esc), g_usb);
+
         snprintf(body, sizeof(body),
                  "{\"usb\":\"%s\",\"game\":%d,\"title\":\"%s\",\"running\":%d,"
                  "\"finished\":%d,\"sources\":%d,\"files\":%llu,\"dirs\":%llu,"
                  "\"bytes\":%llu,\"errors\":%llu,\"current\":\"%s\","
                  "\"message\":\"%s\",\"mounts\":%s}",
-                 g_usb, gr, title, running, finished, sources,
+                 usb_esc, gr, title_esc, running, finished, sources,
                  (unsigned long long)files, (unsigned long long)dirs,
                  (unsigned long long)bytes, (unsigned long long)errors,
-                 cur, msg, mounts);
+                 cur_esc, msg_esc, mounts);
         send_response(fd, "200 OK", "application/json", body);
         return;
     }
@@ -321,6 +392,9 @@ static void handle(int fd) {
 int web_serve(void) {
     struct sockaddr_in a;
     int srv = -1, port = 0, one = 1;
+
+    signal(SIGPIPE, SIG_IGN);
+    find_usb();
 
     for (int i = 0; i < WEB_PORT_TRIES; i++) {
         port = WEB_PORT_FIRST + i;
@@ -362,7 +436,14 @@ int web_serve(void) {
 
     for (;;) {
         int fd = accept(srv, NULL, NULL);
-        if (fd < 0) { if (errno == EINTR) continue; break; }
+        if (fd < 0) {
+            if (errno == EINTR || errno == ECONNABORTED) continue;
+            if (errno == EMFILE || errno == ENFILE) {
+                usleep(50000);
+                continue;
+            }
+            break;
+        }
         handle(fd);
         close(fd);
     }
