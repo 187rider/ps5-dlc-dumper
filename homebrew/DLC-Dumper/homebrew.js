@@ -24,27 +24,30 @@ async function main() {
         secondaryText: 'Start web UI, then dump mounted DLC to USB',
 
         onclick: async () => {
-            return { path: PAYLOAD, args: '' };   // no args = resident web UI
+            return {
+                path: PAYLOAD,
+                daemon: true
+            };
         },
 
         options: [
             {
                 text: 'Dump now — all mounted DLC',
                 onclick: async () => {
-                    return { path: PAYLOAD, args: '--now' };
+                    return { path: PAYLOAD, args: '--now', daemon: true };
                 }
             },
             // Examples of targeting specific DLC folders (replace with your game's DLC IDs):
             {
                 text: 'Dump now — Far Harbor (example)',
                 onclick: async () => {
-                    return { path: PAYLOAD, args: 'FALLOUT4DLC00003' };
+                    return { path: PAYLOAD, args: 'FALLOUT4DLC00003', daemon: true };
                 }
             },
             {
                 text: 'Dump now — Nuka-World (example)',
                 onclick: async () => {
-                    return { path: PAYLOAD, args: 'FALLOUT4DLC00006' };
+                    return { path: PAYLOAD, args: 'FALLOUT4DLC00006', daemon: true };
                 }
             }
         ]

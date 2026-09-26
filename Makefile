@@ -18,6 +18,13 @@ ifneq (,$(filter sim clean,$(MAKECMDGOALS)))
     endif
 endif
 
+# Default SDK path if installed in /opt/ps5-payload-sdk
+ifeq ($(origin PS5_PAYLOAD_SDK), undefined)
+    ifneq ($(wildcard /opt/ps5-payload-sdk),)
+        PS5_PAYLOAD_SDK := /opt/ps5-payload-sdk
+    endif
+endif
+
 ifeq ($(NEEDS_SDK),1)
     ifdef PS5_PAYLOAD_SDK
         include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
