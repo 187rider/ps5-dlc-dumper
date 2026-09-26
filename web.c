@@ -104,10 +104,10 @@ static void send_response(int fd, const char *status, const char *ctype,
     send_all(fd, body, strlen(body));
 }
 
-/* Scan pfsmnt and emit a JSON array of dumpable DLC folder names. */
+/* Scan pfsmnt and live sandboxes, emitting a JSON array of dumpable DLC names. */
 static void json_mounts(char *out, size_t n) {
-    DIR *d;
-    struct dirent *e;
+    DIR *d, *sd;
+    struct dirent *e, *se;
     size_t used = 0;
     int first = 1;
 
@@ -131,6 +131,31 @@ static void json_mounts(char *out, size_t n) {
         }
         closedir(d);
     }
+
+    if ((d = opendir(SANDBOX))) {
+        char sbox[MAXPATH];
+        while ((e = readdir(d)) && used + 128 < n) {
+            if (!str_startswith(e->d_name, "PPSA") && !str_startswith(e->d_name, "CUSA"))
+                continue;
+            if (joinpath(sbox, sizeof(sbox), SANDBOX, e->d_name) != 0) continue;
+            if (!(sd = opendir(sbox))) continue;
+            while ((se = readdir(sd)) && used + 128 < n) {
+                if (!str_startswith(se->d_name, "addcont")) continue;
+                char label[128], esc_label[256];
+                snprintf(label, sizeof(label), "%s/%s", e->d_name, se->d_name);
+                escape_json_str(esc_label, sizeof(esc_label), label);
+                r = snprintf(out + used, n - used, "%s\"%s\"",
+                             first ? "" : ",", esc_label);
+                if (r > 0 && (size_t)r < n - used) {
+                    used += (size_t)r;
+                    first = 0;
+                }
+            }
+            closedir(sd);
+        }
+        closedir(d);
+    }
+
     if (used < n) {
         snprintf(out + used, n - used, "]");
     } else {
