@@ -125,19 +125,19 @@ won't work, for three separate reasons:
 
 ## What it dumps
 
-It checks two locations, in order:
+It supports both DLC models on PS5:
 
-| Source | What it is |
-|---|---|
-| `/mnt/sandbox/pfsmnt/<CONTENTID>-ac` | The canonical decrypted DLC mount. Preferred. |
-| `/mnt/sandbox/<TITLEID>_000/addcont*` | In-sandbox addcont mount points. Used only if no `-ac` folders exist. |
+| Source | What it is | Example Games |
+|---|---|---|
+| `/mnt/sandbox/pfsmnt/<CONTENTID>-ac` | **Decrypted PFS Mounts.** Preferred for asset archives (.ba2, etc.). | Fallout 4, Spider-Man |
+| `/user/addcont/<TITLEID>/<DLC>`<br>`/mnt/ext*/user/addcont/<TITLEID>/<DLC>` | **Installed Addcont Packages.** Unlock & entitlement PKGs, playgo metadata (`ac.json`), plus companion appmeta (`icon0.png`). | Hitman 3 (Dubai, Berlin, Dartmoor...), fighting game characters |
+| `/mnt/sandbox/<TITLEID>_000/addcont*` | **Sandbox Mounts.** Fallback in-sandbox mount points. | In-sandbox mounts |
 
 It explicitly **skips** `-nest`, `-union`, `-app0` and `-patch0` (PFS internals
-and base-game/patch data), and ignores all `NPXS4xxxx` system-app sandboxes.
+and base-game/patch data), and automatically de-duplicates so that raw encrypted packages are not duplicated if the decrypted PFS view is already mounted.
 
-Output goes to `<usb>/PS5_DLC_DUMP/<source-folder-name>/`, plus a `dump.log`
-written alongside it. Folder names are preserved because **the folder name is
-the content ID**, which you need if you ever repack to PKG.
+Output goes to `<usb>/PS5_DLC_DUMP/<CONTENT_ID>/`, plus a `dump.log`
+written alongside it. Folder names preserve the canonical **Content ID** (e.g. `EP3969-PPSA01769_00-DLC0000000000020`), which you need if you ever repack to PKG. Companion icons (`icon0.png`) and metadata are automatically included.
 
 ---
 

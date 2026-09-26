@@ -378,6 +378,246 @@ static int scan_sandbox_addcont(const char *outroot, const char *filter,
     return found;
 }
 
+/* Is any PPSA/CUSA game sandbox alive right now? */
+static int game_running(char *title, size_t tn) {
+    DIR *d;
+    struct dirent *e;
+    int found = 0;
+    if (!(d = opendir(SANDBOX))) return 0;
+    while ((e = readdir(d))) {
+        if (str_startswith(e->d_name, "PPSA") || str_startswith(e->d_name, "CUSA")) {
+            if (title) snprintf(title, tn, "%s", e->d_name);
+            found = 1;
+            break;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
+#ifdef SIM
+static const char *const ADDCONT_ROOTS[] = {
+    "/tmp/ps5sim/user/addcont",
+    "/tmp/ps5sim/ext1/user/addcont",
+    NULL
+};
+static const char *const APPMETA_ROOTS[] = {
+    "/tmp/ps5sim/user/appmeta/addcont",
+    NULL
+};
+#else
+static const char *const ADDCONT_ROOTS[] = {
+    "/user/addcont",
+    "/mnt/ext0/user/addcont",
+    "/mnt/ext1/user/addcont",
+    "/mnt/ext2/user/addcont",
+    "/mnt/ext3/user/addcont",
+    "/mnt/ext4/user/addcont",
+    "/mnt/ext5/user/addcont",
+    "/mnt/ext6/user/addcont",
+    "/mnt/ext7/user/addcont",
+    NULL
+};
+
+static const char *const APPMETA_ROOTS[] = {
+    "/user/appmeta/addcont",
+    "/mnt/ext0/user/appmeta/addcont",
+    "/mnt/ext1/user/appmeta/addcont",
+    "/mnt/ext2/user/appmeta/addcont",
+    "/mnt/ext3/user/appmeta/addcont",
+    NULL
+};
+#endif
+
+/* Extract Content ID from ac.json (e.g. EP3969-PPSA01769_00-DLC0000000000020) */
+static int extract_content_id_from_ac_json(const char *json_path, char *out_cid, size_t outsz) {
+    int fd = open(json_path, O_RDONLY, 0);
+    if (fd < 0) return -1;
+    char buf[4096];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    buf[n] = '\0';
+
+    const char *p = strstr(buf, "ac/");
+    int adv = 3;
+    if (!p) {
+        p = strstr(buf, "ac\\/");
+        adv = 4;
+    }
+    if (p) {
+        p += adv;
+        size_t len = 0;
+        while (p[len] && p[len] != '/' && p[len] != '\\' && p[len] != '"' && len + 1 < outsz) {
+            out_cid[len] = p[len];
+            len++;
+        }
+        out_cid[len] = '\0';
+        if (len >= 16) return 0;
+    }
+
+    /* Fallback: search for standard Content ID pattern like EPxxxx- or UPxxxx- */
+    for (ssize_t i = 0; i < n - 16; i++) {
+        if ((buf[i] == 'E' || buf[i] == 'U' || buf[i] == 'J' || buf[i] == 'H') &&
+            buf[i+1] == 'P' && isdigit((unsigned char)buf[i+2]) &&
+            isdigit((unsigned char)buf[i+3]) && isdigit((unsigned char)buf[i+4]) &&
+            buf[i+5] == '-') {
+            size_t len = 0;
+            const char *s = buf + i;
+            while (s[len] && (isalnum((unsigned char)s[len]) || s[len] == '-' || s[len] == '_') &&
+                   len + 1 < outsz) {
+                out_cid[len] = s[len];
+                len++;
+            }
+            out_cid[len] = '\0';
+            if (len >= 16) return 0;
+        }
+    }
+    return -1;
+}
+
+/* Check if a DLC is already mounted decrypted in /mnt/sandbox/pfsmnt */
+static int is_mounted_in_pfsmnt(const char *cid, const char *dlc_dir) {
+    DIR *d = opendir(PFSMNT);
+    if (!d) return 0;
+    struct dirent *e;
+    int mounted = 0;
+    while ((e = readdir(d))) {
+        if (!str_endswith(e->d_name, "-ac")) continue;
+        if (cid && cid[0] && str_icontains(e->d_name, cid)) {
+            mounted = 1;
+            break;
+        }
+        if (dlc_dir && dlc_dir[0] && str_icontains(e->d_name, dlc_dir)) {
+            mounted = 1;
+            break;
+        }
+    }
+    closedir(d);
+    return mounted;
+}
+
+/* Base title ID like "PPSA01769" from running game, or empty string */
+static int get_running_title_prefix(char *out, size_t outsz) {
+    char title[64];
+    if (outsz == 0) return 0;
+    out[0] = '\0';
+    if (!game_running(title, sizeof(title))) return 0;
+    size_t i = 0;
+    while (title[i] && title[i] != '_' && i + 1 < outsz) {
+        out[i] = title[i];
+        i++;
+    }
+    out[i] = '\0';
+    return 1;
+}
+
+/* Copy installed addcont packages (e.g. Hitman 3 unlock/license PKGs) from disk.
+ * Returns count of DLC directories dumped. */
+static int scan_installed_addcont(const char *outroot, const char *filter,
+                                  void *buf, stats_t *st) {
+    char active_title[32] = "";
+    int has_running = get_running_title_prefix(active_title, sizeof(active_title));
+    int found = 0;
+
+    LOG("Scanning installed addcont directories ...");
+    if (has_running) {
+        LOG("  active game: %s", active_title);
+    }
+
+    for (int r = 0; ADDCONT_ROOTS[r]; r++) {
+        const char *root = ADDCONT_ROOTS[r];
+        DIR *rd = opendir(root);
+        if (!rd) continue;
+
+        struct dirent *te;
+        while ((te = readdir(rd))) {
+            if (!strcmp(te->d_name, ".") || !strcmp(te->d_name, "..")) continue;
+            if (!str_startswith(te->d_name, "PPSA") && !str_startswith(te->d_name, "CUSA"))
+                continue;
+
+            /* If a game is running and no filter is active, only scan DLCs for that game. */
+            if (has_running && (!filter || !filter[0])) {
+                if (strcmp(te->d_name, active_title) != 0) continue;
+            }
+
+            char tpath[MAXPATH];
+            if (joinpath(tpath, sizeof(tpath), root, te->d_name) != 0) continue;
+            if (!is_dir(tpath)) continue;
+
+            DIR *td = opendir(tpath);
+            if (!td) continue;
+
+            struct dirent *de;
+            while ((de = readdir(td))) {
+                if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+
+                char dlc_src[MAXPATH];
+                if (joinpath(dlc_src, sizeof(dlc_src), tpath, de->d_name) != 0) continue;
+                if (!is_dir(dlc_src)) continue;
+
+                /* Determine Content ID from ac.json if available */
+                char json_path[MAXPATH], cid[128] = "";
+                if (joinpath(json_path, sizeof(json_path), dlc_src, "ac.json") == 0) {
+                    extract_content_id_from_ac_json(json_path, cid, sizeof(cid));
+                }
+                if (cid[0] == '\0') {
+                    snprintf(cid, sizeof(cid), "%s_%s", te->d_name, de->d_name);
+                }
+
+                /* Skip if already mounted decrypted in pfsmnt (e.g. Fallout 4) */
+                if (is_mounted_in_pfsmnt(cid, de->d_name)) {
+                    LOG("  skip %s (already mounted in pfsmnt)", cid);
+                    continue;
+                }
+
+                /* Check filter */
+                if (filter && filter[0]) {
+                    if (!str_icontains(cid, filter) &&
+                        !str_icontains(de->d_name, filter) &&
+                        !str_icontains(te->d_name, filter)) {
+                        continue;
+                    }
+                }
+
+                char dp[MAXPATH];
+                if (joinpath(dp, sizeof(dp), outroot, cid) != 0) continue;
+
+                LOG("");
+                LOG("==> Installed DLC: %s (%s)", cid, dlc_src);
+                LOG("    -> %s", dp);
+                copy_tree(dlc_src, dp, 0, buf, st);
+
+                /* Copy companion appmeta (icon0.png, param.json) if it exists */
+                for (int m = 0; APPMETA_ROOTS[m]; m++) {
+                    char meta_src[MAXPATH];
+                    snprintf(meta_src, sizeof(meta_src), "%s/%s/%s",
+                             APPMETA_ROOTS[m], te->d_name, de->d_name);
+                    if (is_dir(meta_src)) {
+                        char meta_dst[MAXPATH];
+                        snprintf(meta_dst, sizeof(meta_dst), "%s/sce_sys", dp);
+                        copy_tree(meta_src, meta_dst, 0, buf, st);
+
+                        char icon_src[MAXPATH], icon_dst[MAXPATH];
+                        snprintf(icon_src, sizeof(icon_src), "%s/icon0.png", meta_src);
+                        snprintf(icon_dst, sizeof(icon_dst), "%s/icon0.png", dp);
+                        struct stat ist;
+                        if (stat(icon_src, &ist) == 0) {
+                            copy_file(icon_src, icon_dst, buf, st);
+                        }
+                        break;
+                    }
+                }
+
+                found++;
+            }
+            closedir(td);
+        }
+        closedir(rd);
+    }
+    return found;
+}
+
 /* ------------------------------ dump driver ------------------------------ */
 
 /* Returns: -1 no writable USB, otherwise the number of sources dumped. */
@@ -430,6 +670,9 @@ int run_dump(const char *filter, stats_t *st) {
         LOG("No *-ac folders in pfsmnt. Trying sandbox addcont mount points ...");
         found += scan_sandbox_addcont(outroot, filter, buf, st);
     }
+    LOG("");
+    LOG("Scanning installed addcont (unlock / entitlement DLCs) ...");
+    found += scan_installed_addcont(outroot, filter, buf, st);
     t1 = time(NULL);
 
     LOG("");

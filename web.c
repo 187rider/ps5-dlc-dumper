@@ -104,7 +104,7 @@ static void send_response(int fd, const char *status, const char *ctype,
     send_all(fd, body, strlen(body));
 }
 
-/* Scan pfsmnt and live sandboxes, emitting a JSON array of dumpable DLC names. */
+/* Scan pfsmnt, live sandboxes, and installed addcont, emitting a JSON array of dumpable DLC names. */
 static void json_mounts(char *out, size_t n) {
     DIR *d, *sd;
     struct dirent *e, *se;
@@ -156,28 +156,67 @@ static void json_mounts(char *out, size_t n) {
         closedir(d);
     }
 
+    /* Installed addcont packages (e.g. Hitman 3 unlock/license PKGs) */
+    char active_title[32] = "";
+    int has_running = get_running_title_prefix(active_title, sizeof(active_title));
+
+    for (int ri = 0; ADDCONT_ROOTS[ri] && used + 128 < n; ri++) {
+        const char *root = ADDCONT_ROOTS[ri];
+        DIR *rd = opendir(root);
+        if (!rd) continue;
+
+        struct dirent *te;
+        while ((te = readdir(rd)) && used + 128 < n) {
+            if (!strcmp(te->d_name, ".") || !strcmp(te->d_name, "..")) continue;
+            if (!str_startswith(te->d_name, "PPSA") && !str_startswith(te->d_name, "CUSA"))
+                continue;
+
+            if (has_running && strcmp(te->d_name, active_title) != 0)
+                continue;
+
+            char tpath[MAXPATH];
+            if (joinpath(tpath, sizeof(tpath), root, te->d_name) != 0) continue;
+            DIR *td = opendir(tpath);
+            if (!td) continue;
+
+            struct dirent *de;
+            while ((de = readdir(td)) && used + 128 < n) {
+                if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+
+                char dlc_src[MAXPATH];
+                if (joinpath(dlc_src, sizeof(dlc_src), tpath, de->d_name) != 0) continue;
+                if (!is_dir(dlc_src)) continue;
+
+                char json_path[MAXPATH], cid[128] = "";
+                if (joinpath(json_path, sizeof(json_path), dlc_src, "ac.json") == 0) {
+                    extract_content_id_from_ac_json(json_path, cid, sizeof(cid));
+                }
+                if (cid[0] == '\0') {
+                    snprintf(cid, sizeof(cid), "%s_%s", te->d_name, de->d_name);
+                }
+
+                if (is_mounted_in_pfsmnt(cid, de->d_name)) continue;
+                if (strstr(out, cid)) continue;
+
+                char esc_name[128];
+                escape_json_str(esc_name, sizeof(esc_name), cid);
+                r = snprintf(out + used, n - used, "%s\"%s\"",
+                             first ? "" : ",", esc_name);
+                if (r > 0 && (size_t)r < n - used) {
+                    used += (size_t)r;
+                    first = 0;
+                }
+            }
+            closedir(td);
+        }
+        closedir(rd);
+    }
+
     if (used < n) {
         snprintf(out + used, n - used, "]");
     } else {
         out[n - 1] = '\0';
     }
-}
-
-/* Is any PPSA/CUSA game sandbox alive right now? */
-static int game_running(char *title, size_t tn) {
-    DIR *d;
-    struct dirent *e;
-    int found = 0;
-    if (!(d = opendir(SANDBOX))) return 0;
-    while ((e = readdir(d))) {
-        if (str_startswith(e->d_name, "PPSA") || str_startswith(e->d_name, "CUSA")) {
-            if (title) snprintf(title, tn, "%s", e->d_name);
-            found = 1;
-            break;
-        }
-    }
-    closedir(d);
-    return found;
 }
 
 /* ------------------------------ dump thread ------------------------------ */
@@ -283,16 +322,15 @@ static const char *PAGE =
 ".e{color:#8b949e;font-size:13px;padding:6px 0}"
 "</style></head><body><div class=w>"
 "<h1>PS5 DLC Dumper</h1>"
-"<div class=sub>Copies decrypted, mounted DLC to USB. Dump content you own.</div>"
+"<div class=sub>Copies decrypted mounts & installed addcont DLC to USB. Dump content you own.</div>"
 "<div class=c id=st></div>"
-"<div class=c><b>Mounted DLC</b><div id=ls></div></div>"
-"<div class=c><button id=all onclick='dump(\"\")'>Dump all mounted DLC</button>"
+"<div class=c><b>Detected DLC</b><div id=ls></div></div>"
+"<div class=c><button id=all onclick='dump(\"\")'>Dump all detected DLC</button>"
 "<div class=m id=msg></div></div>"
 "<div class=c style='font-size:13px;color:#8b949e'>"
-"<b style='color:#e6edf3'>If nothing is listed:</b><br>"
-"1. kstuff must be loaded <i>before</i> the game launches<br>"
-"2. the game must be running now (PS button to home is fine, don't close it)<br>"
-"3. enter the DLC content in-game once - many titles mount add-ons lazily"
+"<b style='color:#e6edf3'>DLC Detection:</b><br>"
+"- <b>Decrypted Mounts (PFS):</b> Game must run with kstuff loaded. Enter DLC in-game if lazy-mounted.<br>"
+"- <b>Installed Addcont (Unlock PKGs):</b> Detected directly from internal & M.2 storage (e.g. Hitman 3)."
 "</div></div><script>"
 "function esc(s){return s.replace(/[&<>'\\\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\\'':'&#39;','\"':'&quot;'}[c]))}"
 "function gb(b){return (b/1073741824).toFixed(2)+' GiB'}"
@@ -309,7 +347,7 @@ static const char *PAGE =
 "   '<div class=r><span class=k>Copied</span><span class=v>'+gb(s.bytes)+'</span></div>'+"
 "   '<div class=r><span class=k>Errors</span><span class=v class='+(s.errors?'bad':'ok')+'>'+s.errors+'</span></div>';"
 "  const L=document.getElementById('ls');"
-"  if(!s.mounts.length){L.innerHTML='<div class=e>None mounted yet.</div>';}"
+"  if(!s.mounts.length){L.innerHTML='<div class=e>No DLC detected yet.</div>';}"
 "  else{L.innerHTML='<ul>'+s.mounts.map(m=>'<li><span class=n>'+esc(m)+'</span>'+"
 "   '<button class=s '+(s.running?'disabled':'')+' onclick=\"dump(\\''+esc(m)+'\\')\">Dump</button></li>').join('')+'</ul>';}"
 "  document.getElementById('all').disabled=s.running||!s.mounts.length;"
@@ -347,6 +385,12 @@ static void handle(int fd) {
     if (!strcmp(path, "/") || !strncmp(path, "/index", 6)) {
         send_response(fd, "200 OK", "text/html; charset=utf-8", PAGE);
         return;
+    }
+
+    if (!strcmp(path, "/exit") || !strcmp(path, "/quit")) {
+        send_response(fd, "200 OK", "application/json", "{\"ok\":1,\"message\":\"exiting\"}");
+        close(fd);
+        exit(0);
     }
 
     if (!strncmp(path, "/dump", 5)) {
