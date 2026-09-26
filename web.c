@@ -357,8 +357,14 @@ static void handle(int fd) {
         title[0] = '\0';
         gr = game_running(title, sizeof(title));
 
-        if (g_usb[0] == '\0' || !is_dir(g_usb)) {
-            find_usb();
+        /* Only refresh g_usb while idle: run_dump() writes the same global
+         * from the dump thread, so probing here during a dump is a data race. */
+        {
+            int busy;
+            pthread_mutex_lock(&g_wslock);
+            busy = g_ws.running;
+            pthread_mutex_unlock(&g_wslock);
+            if (!busy && (g_usb[0] == '\0' || !is_dir(g_usb))) find_usb();
         }
 
         pthread_mutex_lock(&g_wslock);

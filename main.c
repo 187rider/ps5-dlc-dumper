@@ -399,10 +399,18 @@ int run_dump(const char *filter, stats_t *st) {
         return -1;
     }
 
-    if (!g_log) {
-        snprintf(logpath, sizeof(logpath), "%s/dump.log", outroot);
-        g_log = fopen(logpath, "a");
+    /* Reopen the log if it was never opened, OR if the file it points at has
+     * vanished (USB replug, dump dir deleted). Without this the handle goes
+     * stale and every later log line is silently written to a dead inode. */
+    snprintf(logpath, sizeof(logpath), "%s/dump.log", outroot);
+    if (g_log) {
+        struct stat lst;
+        if (stat(logpath, &lst) != 0) {
+            fclose(g_log);
+            g_log = NULL;
+        }
     }
+    if (!g_log) g_log = fopen(logpath, "a");
 
     if (!(buf = malloc(COPYBUF))) {
         LOG("FATAL: out of memory");

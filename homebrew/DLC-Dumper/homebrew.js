@@ -34,14 +34,15 @@ async function main() {
                     return { path: PAYLOAD, args: '--now' };
                 }
             },
+            // Examples of targeting specific DLC folders (replace with your game's DLC IDs):
             {
-                text: 'Dump now — Far Harbor only',
+                text: 'Dump now — Far Harbor (example)',
                 onclick: async () => {
                     return { path: PAYLOAD, args: 'FALLOUT4DLC00003' };
                 }
             },
             {
-                text: 'Dump now — Nuka-World only',
+                text: 'Dump now — Nuka-World (example)',
                 onclick: async () => {
                     return { path: PAYLOAD, args: 'FALLOUT4DLC00006' };
                 }
